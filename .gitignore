@@ -1,0 +1,5 @@
+src/scene.cl
+src/scene_config.ron
+src/scene_defines.h
+target/
+output/
