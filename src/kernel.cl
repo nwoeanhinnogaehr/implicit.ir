@@ -57,15 +57,15 @@ double3 from_spherical(double3 sph) {
 }
 
 void path_trace(
-        double3 source,
-        double3 dir,
-        int subscene_id,
-        int run,
-        Target *min_target,
-        double *total_dist,
-        double3 *intersect_pos,
-        double3 *intersect_dir,
-        int *closest_bounce) {
+        double3 source, // start position
+        double3 dir, // direction (should be unit)
+        int subscene_id, // [0,NUM_SUBSCENES)
+        int run, // [0,NUM_RUNS)
+        Target *min_target, // output: closest target
+        double *total_dist, // output: total distance
+        double3 *intersect_pos, // output: target intersection position
+        double3 *intersect_dir, // output: target intersection direction
+        int *closest_bounce) { // output: number of bounces at target intersection point
     const double eps = 0.0000001;
     Target min_target_ = INF_TARGET;
     double total = 0.0;
@@ -76,6 +76,7 @@ void path_trace(
     //*intersect_dir = 0.0;
     for (int i = 0; i < MAX_BOUNCES; i++) {
         bounce_count++;
+        // sphere tracing
         do {
             dist = sdf_scene(p, subscene_id);
             p += dist * dir;
@@ -84,18 +85,21 @@ void path_trace(
                 *closest_bounce = bounce_count;
                 min_target_ = t;
                 *intersect_dir = dir;
+                *intersect_pos = pos;
             }
             total += dist;
         } while (dist > eps && total < MAX_DIST);
-        if (1/pow(total+1.0, 2.0) < 0.001) {
-            break;
+
+        if (1/pow(total+1.0, 2.0) < 0.0001) {
+            break; // contribution to impulse response is negligible
         }
         if (min_target_.dist < eps) {
-            *intersect_pos = p;
-            *intersect_dir = dir;
+            // hit target
             break;
         }
+        // step back from surface before calculating gradient
         p-=0.000001*dir;
+
 #if DIFFUSE
         dir = cosineDirection(hash(((i+1)*(run+1))*173.483297)
                 +hash(p.x*179+100)
@@ -131,6 +135,8 @@ kernel void trace(
     int y = idx/width;
     double2 uv = (double2)((double)x / (double)width, (double)y / (double)width);
     uv += (double2)(hash(uv.y+run) / (double)width, hash(uv.x+run) / (double)width);
+
+    // ray origin and direction
     double3 origin = SOURCE;
     double3 dir = from_spherical((double3)(
                 uv.x*(SOURCE_THETA_MAX-SOURCE_THETA_MIN)+SOURCE_THETA_MIN,
@@ -170,12 +176,14 @@ kernel void scene_render(
     const double maxd = DEBUG_MAX_DIST;
     double dist = intersect(origin, dir, 0.001, maxd, subscene_id);
     if (dist < maxd) {
+        // found intersection, do shading
         double3 pt = origin + dir*(dist-0.01);
         double3 normal = grad_sdf_scene(pt, subscene_id);
         double3 light = normalize(DEBUG_LIGHT_DIR);
         double shade = max(0.0, -dot(light, normal));
         image[idx] = shade;
     } else {
+        // no intersection
         image[idx] = 0.0;
     }
 }
@@ -192,6 +200,8 @@ kernel void debug_render(
     int id0res = get_global_size(0);
     int id1res = get_global_size(1);
     int idx = id0*id0res + id1;
+
+    // multiple options for debug output, for experimentation
 
     //image[idx] += g_intersect_dir[idx];
     //image[idx] += g_intersect_dir[idx] / (1.0+g_total_dist[idx]);
@@ -213,15 +223,18 @@ kernel void gen_impulse_response(
     int id0res = get_global_size(0);
     int id1res = get_global_size(1);
     int idx = id0*id0res + id1;
+
     Target target = g_min_target[idx];
     if (target.dist < 0.00001) {
+        // this ray intersected a target
         double dist = g_total_dist[idx];
-        double impulse_time = dist / SPEED_OF_SOUND * SAMPLE_RATE;
+        double impulse_time = dist / SPEED_OF_SOUND * SAMPLE_RATE; // time in samples
         int impulse_idx = ((int)impulse_time) * NUM_TARGETS;
         double idx_fract = fmod(impulse_time, 1.0);
         if (impulse_idx+2*NUM_TARGETS < impulse_len) {
-            double sample = pow(-1.0, g_closest_bounce[idx]) / pow(dist+1.0, 2.0);
-            double output = sample * max(0.0, dot(g_intersect_dir[idx], (double3)(target.axisx, target.axisy, target.axisz)));
+            double sample = pow(-1.0, g_closest_bounce[idx]) / pow(dist+1.0, 2.0); // attenuation
+            double output = sample * max(0.0, dot(g_intersect_dir[idx], (double3)(target.axisx, target.axisy, target.axisz))); // angular filter
+            // lerp between adjacent bins
             atomic_add_double(&impulse[impulse_idx+target.id], output*(1.0-idx_fract));
             atomic_add_double(&impulse[impulse_idx+target.id+NUM_TARGETS], output*idx_fract);
         }
