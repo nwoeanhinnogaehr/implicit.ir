@@ -85,7 +85,7 @@ void path_trace(
                 *closest_bounce = bounce_count;
                 min_target_ = t;
                 *intersect_dir = dir;
-                *intersect_pos = pos;
+                *intersect_pos = p;
             }
             total += dist;
         } while (dist > eps && total < MAX_DIST);
